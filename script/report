@@ -1,0 +1,178 @@
+#!/usr/bin/env perl
+
+use v5.18;
+use strict;
+use warnings;
+
+package Payload {
+	use overload ('""' => 'stringify');
+
+	sub new {
+		my ($class, $method, $config, $content) = @_;
+
+		$config     = {} unless $config;
+
+		my $data    = {
+			method    => $method || '',
+			api_key   => $config->{api_key} || '',
+			username  => $config->{username} || '',
+			password  => $config->{password} || '',
+			content   => $content || '',
+		};
+
+		my $self    = bless $data, $class;
+
+		return $self;
+	}
+
+	sub stringify {
+		my ($self) = @_;
+		my $method = $self->{method};
+		my $key    = $self->{api_key};
+		my    $username = $self->{username};
+		my    $password = $self->{password};
+		my    $content  = $self->{content};
+
+		my $xml         = "
+			<?xml version='1.0' encoding='UTF-8'?>
+			<xmws>
+				<apikey>$key</apikey>
+				<authuser>$username</authuser>
+				<authpass>$password</authpass>
+				<request>$method</request>
+				<content>$content</content>
+			</xmws>
+		";
+
+		return $xml;
+	}
+}
+
+package Client {
+	use FindBin '$RealBin';
+	use Config::Merge;
+	use Data::Dump 'dump';
+	use HTTP::Request;
+	use WWW::Mechanize;
+	use XML::Parser;
+
+	sub new {
+		my ($class, @args) = @_;
+		my $dir            = "$RealBin/../conf";
+
+		unless (-d $dir) {
+			die "$dir is not a valid directory.  Please supply the path to a valid directory containing configuration files.";
+		}
+
+		my $config         = Config::Merge->new($dir)->();
+
+		my $data           = {
+			config           => $config,
+			parser           => XML::Parser->new(Style => 'Objects'),
+			browser          => WWW::Mechanize->new(autocheck => 0),
+		};
+
+		my $self           = bless $data, $class;
+
+		return $self;
+	}
+
+	sub run {
+		my ($self)  = @_;
+		my $info    = {
+			stats     => $self->get_usage_stats(),
+			domains   => $self->get_domains(),
+		};
+
+		say dump $info;
+		return;
+	}
+
+	sub get_usage_stats {
+		my ($self) = @_;
+		my $module   = 'usage_viewer';
+		my $method   = 'GetServerUsageStats';
+		my $result   = $self->get_data($module, $method);
+		my $stats    = $result->[0]->{Kids}->[1]->{Kids}->[0]->{Kids};
+		my $info     = {};
+
+		foreach my $item (@$stats) {
+			my $name   = ref $item;
+			my $value  = $item->{Kids}->[0]->{Text};
+
+			$name      =~ s/Client:://g;
+
+			$info->{$name} = $value;
+		}
+
+		return $info;
+	}
+
+	sub get_users {
+		my ($self) = @_;
+		my $module   = 'manage_clients';
+		my $method   = 'GetAllClients';
+		my $result   = $self->get_data($module, $method);
+
+		return $result;
+	}
+
+	sub get_domains {
+		my ($self) = @_;
+		my $module   = 'domains';
+		my $method   = 'GetAllDomains';
+		my $result   = $self->get_data($module, $method);
+		my $domains  = $result->[0]->{Kids}->[1]->{Kids};
+		my $info     = {};
+
+		foreach my $item (@$domains) {
+			my $name   = $item->{Kids}->[2]->{Kids}->[0]->{Text};
+			my $active = $item->{Kids}->[4]->{Kids}->[0]->{Text};
+
+			$info->{$name} = $active;
+		}
+
+		return $info;
+	}
+
+	sub get_data {
+		my ($self, $module, $method) = @_;
+		my $config   = $self->{config};
+		my $host     = $config->{host} || 'localhost';
+		my $url      = "http://$host/api/$module/";
+		my $payload  = Payload->new($method, $config);
+		my $xml      = $self->make_request($url, $payload);
+		my $result   = $self->parse_response($xml);
+
+		return $result;
+	}
+
+	sub parse_response {
+		my ($self, $xml) = @_;
+		my $parser   = $self->{parser};
+
+		$xml            =~ s/\n//g;
+		$xml            =~ s/\t//g;
+
+		my    $output   = $parser->parse($xml);
+
+		return $output;
+	}
+
+	sub make_request {
+		my ($self, $url, $payload) = @_;
+		my $browser     = $self->{browser};
+		my $headers     = ['Content-Type' => 'application/xml'];
+		my $request     = HTTP::Request->new(POST => $url, $headers, "$payload");
+		my $response    = $browser->request($request);
+		my $content     = $response->content();
+
+		$content        =~ s/\r//g;
+
+		return $content;
+	}
+}
+
+my $client = Client->new(@ARGV);
+
+$client->run();
